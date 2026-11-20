@@ -6,7 +6,7 @@
 <title>实体键桥</title>
 <script src="/static/vue.global.prod.js"></script>
 <style>
-  :root{--bg:#1a1a1a;--panel:#111;--line:#333;--text:#f2f2f2;--muted:#9a9a9a;--accent:#ff7a18;--ok:#7CFC00;--bad:#ff4d4d}
+  :root{--bg:#1a1a1a;--panel:#111;--line:#333;--text:#f2f2f2;--muted:#9a9a9a;--accent:#ff7a18;--ok:#7CFC00;--bad:#ff4d4d;--warn:#ffd166}
   *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI","PingFang SC",sans-serif}
   .top{padding:16px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;background:#0d0d0d}
   .top h1{margin:0;font-size:20px;letter-spacing:.04em}
@@ -14,21 +14,27 @@
   .split{display:grid;grid-template-columns:1fr 18px 1fr;min-height:calc(100vh - 64px)}
   .pane{padding:16px;overflow:auto}
   .bridge{background:linear-gradient(180deg,transparent,#ff7a18,transparent);width:2px;margin:0 auto;position:relative}
-  .bridge:before{content:"重映";position:absolute;top:40%;left:50%;transform:translate(-50%,-50%);background:#1a1a1a;color:var(--accent);font-size:11px;padding:4px 0;writing-mode:vertical-rl}
+  .bridge:before{content:"持租";position:absolute;top:40%;left:50%;transform:translate(-50%,-50%);background:#1a1a1a;color:var(--accent);font-size:11px;padding:4px 0;writing-mode:vertical-rl}
   .box{border:1px solid var(--line);background:var(--panel);padding:12px;margin-bottom:12px}
   .box h2{margin:0 0 10px;font-size:13px;color:var(--muted);font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+  .box h2 small{float:right;font-weight:400;color:#666;text-transform:none;letter-spacing:0}
   table{width:100%;border-collapse:collapse;font-size:12px;font-family:Consolas,monospace}
-  th,td{padding:8px 4px;border-bottom:1px solid #2a2a2a;text-align:left}
+  th,td{padding:7px 4px;border-bottom:1px solid #2a2a2a;text-align:left;vertical-align:top}
   input{width:100%;background:#000;border:1px solid #444;color:#fff;padding:10px;font-family:Consolas,monospace;margin:6px 0 10px}
   .primary{background:var(--accent);color:#111;border:0;padding:10px 12px;font-weight:700;cursor:pointer;width:100%}
+  .primary:disabled{background:#4a3a2a;color:#886;cursor:not-allowed}
   .ghost{background:transparent;border:1px solid #666;color:#ddd;padding:6px 8px;cursor:pointer}
+  .row{display:flex;gap:8px;align-items:center}
   .login{max-width:420px;margin:14vh auto;background:#111;border:1px solid #333;padding:22px}
   .err{color:var(--bad);min-height:18px;font-size:12px}
+  .hint{color:var(--warn);font-size:11px;line-height:1.6;margin:6px 0}
   .pill{border:1px solid #444;padding:2px 6px;font-size:11px;color:var(--muted)}
-  .ok{color:var(--ok)}.bad{color:var(--bad)}
-  .tabs{display:flex;gap:8px;margin-bottom:10px}
+  .pill.on{border-color:var(--ok);color:var(--ok)}
+  .ok{color:var(--ok)}.bad{color:var(--bad)}.muted{color:var(--muted)}.warn{color:var(--warn)}
+  .tabs{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
   .tabs button{background:#000;border:1px solid #333;color:#aaa;padding:6px 8px;cursor:pointer}
   .tabs button.on{border-color:var(--accent);color:var(--accent)}
+  .mono{font-family:Consolas,monospace;font-size:11px;word-break:break-all}
 </style>
 </head>
 <body>
@@ -45,15 +51,25 @@ setTimeout(function () {
 </script>
 
 <script>
-const {createApp,ref,onMounted}=Vue;
+const {createApp,ref,computed,onMounted}=Vue;
 createApp({
   setup(){
     const token=ref(localStorage.getItem('keyremap_token')||'');
     const user=ref(localStorage.getItem('keyremap_user')||'');
-    const username=ref('admin'), password=ref('123456'), err=ref(''), actionErr=ref('');
+    const username=ref('admin'), password=ref('123456'), err=ref(''), actionErr=ref(''), actionOk=ref('');
     const leftTab=ref(0), rightTab=ref(0);
     const versions=ref([]), mappings=ref([]), formal=ref([]), conflicts=ref([]);
+    const leases=ref([]), contentions=ref([]), path=ref('');
     const oldKey=ref('OLD-B1');
+    const leaseKind=ref('remap');      // 本次准备申请的租约用途
+    const leaseToken=ref('');           // 已持有、待兑付的租约令牌
+    const leaseScope=ref('');           // 令牌对应的 scope
+    const cutoverVersion=ref('m-2026.12');
+
+    const activeVersion=computed(()=>{const v=versions.value.find(x=>x.status==='生效');return v?v.version:'';});
+    const leaseScopeFor=computed(()=>'version:'+(leaseKind.value==='cutover'?cutoverVersion.value:activeVersion.value));
+    const heldLive=computed(()=>leases.value.filter(l=>l.active));
+
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
       err.value='';
@@ -63,82 +79,177 @@ createApp({
       localStorage.setItem('keyremap_token',j.token); localStorage.setItem('keyremap_user',j.username);
       await refresh();
     }
-    function logout(){token.value='';user.value='';localStorage.removeItem('keyremap_token');localStorage.removeItem('keyremap_user');}
-    async function loadJson(url){
-      const r=await fetch(url,{headers:auth()});
+    function logout(){token.value='';user.value='';leaseToken.value='';leaseScope.value='';localStorage.removeItem('keyremap_token');localStorage.removeItem('keyremap_user');}
+    async function loadJson(url,opt){
+      const r=await fetch(url,opt?{...opt,headers:auth()}:{headers:auth()});
       const j=await r.json().catch(()=>({}));
       if(r.status===401){ logout(); return null; }
-      return j;
+      return {status:r.status,ok:r.ok,body:j};
     }
     async function refresh(){
       if(!token.value) return;
       const v=await loadJson('/api/map-versions'); if(v===null) return;
-      versions.value=Array.isArray(v.items)?v.items:[];
+      versions.value=Array.isArray(v.body.items)?v.body.items:[];
       const m=await loadJson('/api/mappings'); if(m===null) return;
-      mappings.value=Array.isArray(m.items)?m.items:[];
+      mappings.value=Array.isArray(m.body.items)?m.body.items:[];
       const f=await loadJson('/api/formal'); if(f===null) return;
-      formal.value=Array.isArray(f.items)?f.items:[];
+      formal.value=Array.isArray(f.body.items)?f.body.items:[];
       const c=await loadJson('/api/conflicts'); if(c===null) return;
-      conflicts.value=Array.isArray(c.items)?c.items:[];
+      conflicts.value=Array.isArray(c.body.items)?c.body.items:[];
+      const l=await loadJson('/api/leases'); if(l===null) return;
+      leases.value=Array.isArray(l.body.items)?l.body.items:[];
+      const k=await loadJson('/api/contentions'); if(k===null) return;
+      contentions.value=Array.isArray(k.body.items)?k.body.items:[];
     }
+    function resetMsg(){actionErr.value='';actionOk.value='';}
+    // 1) 先租
+    async function acquireLease(){
+      resetMsg();
+      const scope=leaseScopeFor.value;
+      const r=await loadJson('/api/leases/acquire',{method:'POST',body:JSON.stringify({scope_key:scope,kind:leaseKind.value})});
+      if(!r) return;
+      if(!r.ok){actionErr.value=r.body.detail||'租约获取失败';await refresh();return;}
+      leaseToken.value=r.body.token; leaseScope.value=r.body.scope_key;
+      actionOk.value='已持租 '+r.body.scope_key+'（'+r.body.kind+'）至 '+r.body.lease_until;
+      await refresh();
+    }
+    // 2) 后写：切版
+    async function doCutover(){
+      resetMsg();
+      if(!leaseToken.value||leaseScope.value!=='version:'+cutoverVersion.value){
+        actionErr.value='未持 '+cutoverVersion.value+' 的切版租约，整笔拒绝';return;
+      }
+      const r=await loadJson('/api/cutover',{method:'POST',body:JSON.stringify({version:cutoverVersion.value,lease_token:leaseToken.value})});
+      if(!r) return;
+      if(!r.ok){actionErr.value=r.body.detail||'切版失败';}
+      else{actionOk.value='已切版生效：'+r.body.version+'（'+r.body.effective_from+'）';leaseToken.value='';leaseScope.value='';}
+      await refresh();
+    }
+    // 2) 后写：重映
     async function doRemap(){
-      actionErr.value='';
-      const r=await fetch('/api/remap',{method:'POST',headers:auth(),body:JSON.stringify({old_key:oldKey.value})});
-      const j=await r.json(); actionErr.value=r.ok?('正式键 '+j.entity_key):(j.detail||'失败');
+      resetMsg();
+      if(!leaseToken.value||leaseScope.value!=='version:'+activeVersion.value){
+        actionErr.value='未持生效版本 '+activeVersion.value+' 的重映租约，正式区零改动';return;
+      }
+      const r=await loadJson('/api/remap',{method:'POST',body:JSON.stringify({old_key:oldKey.value,lease_token:leaseToken.value})});
+      if(!r) return;
+      if(!r.ok){actionErr.value=r.body.detail||'重映失败';}
+      else{actionOk.value='正式键 '+r.body.entity_key+' 已入正式区';leaseToken.value='';leaseScope.value='';}
+      await refresh();
+    }
+    async function releaseLease(){
+      resetMsg();
+      if(!leaseToken.value){actionErr.value='当前没有待释放的租约令牌';return;}
+      const r=await loadJson('/api/leases/release',{method:'POST',body:JSON.stringify({lease_token:leaseToken.value})});
+      if(!r) return;
+      if(!r.ok){actionErr.value=r.body.detail||'释放失败';}
+      else{actionOk.value='已释放 '+r.body.scope_key;leaseToken.value='';leaseScope.value='';}
       await refresh();
     }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,actionErr,leftTab,rightTab,versions,mappings,formal,conflicts,oldKey,login,logout,doRemap};
+    return {token,user,username,password,err,actionErr,actionOk,leftTab,rightTab,
+      versions,mappings,formal,conflicts,leases,contentions,path,
+      oldKey,leaseKind,leaseToken,leaseScope,cutoverVersion,activeVersion,leaseScopeFor,heldLive,
+      login,logout,refresh,acquireLease,doCutover,doRemap,releaseLease};
   },
   template:`
   <div v-if="!token" class="login">
     <h1 style="margin-top:0">实体键<em style="color:#ff7a18;font-style:normal">桥</em></h1>
-    <p style="color:#9a9a9a">左侧映射，右侧正式区与冲突。入站旧键必须先重映。</p>
+    <p style="color:#9a9a9a">切版与重映都必须先持版本级租约；未持租整笔拒绝，生效窗与正式区零改动。</p>
     <label>用户名</label><input v-model="username"/><label>密码</label><input type="password" v-model="password"/>
     <div class="err">{{err}}</div><button class="primary" @click="login">接通键桥</button>
   </div>
   <div v-if="token">
     <div class="top">
-      <h1>实体键<em>桥</em> <span class="pill">旧键 → 正式键</span></h1>
-      <div>{{user}} <button class="ghost" @click="logout">退出</button></div>
+      <h1>实体键<em>桥</em> <span class="pill" :class="{on:!!leaseToken}">{{leaseToken?'持租中':'未持租'}}</span>
+        <span class="pill">先租后写</span></h1>
+      <div>{{user}} <button class="ghost" @click="refresh">刷新</button> <button class="ghost" @click="logout">退出</button></div>
     </div>
     <div class="split">
       <div class="pane">
         <div class="tabs">
           <button :class="{on:leftTab===0}" @click="leftTab=0">映射版本</button>
-          <button :class="{on:leftTab===1}" @click="leftTab=1">执行重映</button>
+          <button :class="{on:leftTab===1}" @click="leftTab=1">租约</button>
+          <button :class="{on:leftTab===2}" @click="leftTab=2">切版 / 重映</button>
         </div>
+
         <div class="box" v-show="leftTab===0">
           <h2>Map Versions</h2>
           <table><thead><tr><th>version</th><th>status</th><th>from</th></tr></thead>
-          <tbody><tr v-for="v in versions" :key="v.id"><td>{{v.version}}</td><td>{{v.status}}</td><td>{{v.effective_from}}</td></tr></tbody></table>
+          <tbody><tr v-for="v in versions" :key="v.id"><td>{{v.version}}</td>
+            <td :class="v.status==='生效'?'ok':'muted'">{{v.status}}</td><td>{{v.effective_from}}</td></tr></tbody></table>
           <h2 style="margin-top:14px">Mappings</h2>
           <table><thead><tr><th>old</th><th>new</th><th>kind</th></tr></thead>
           <tbody><tr v-for="m in mappings" :key="m.id"><td>{{m.old_key}}</td><td class="ok">{{m.new_key}}</td><td>{{m.kind}}</td></tr></tbody></table>
         </div>
+
         <div class="box" v-show="leftTab===1">
-          <h2>Ingress Remap</h2>
+          <h2>Leases <small>只读核证 · 落库账目</small></h2>
+          <div class="hint">租约物化为 lease 行（scope_key + holder + lease_until + kind）。同 scope 同时只允一条存活租约；后到者只留争用审计。</div>
+          <table><thead><tr><th>scope</th><th>kind</th><th>holder</th><th>until</th><th>state</th></tr></thead>
+          <tbody><tr v-for="l in leases" :key="l.id">
+            <td class="mono">{{l.scope_key}}</td><td>{{l.kind}}</td><td>{{l.holder}}</td>
+            <td class="mono">{{l.lease_until}}</td>
+            <td :class="l.active?'ok':'muted'">{{l.active?'存活':(l.released_at?'已释放':'已过期')}}</td>
+          </tr></tbody></table>
+          <div v-if="!leases.length" class="muted" style="font-size:12px;margin-top:8px">暂无租约记录</div>
+          <div class="row" style="margin-top:12px">
+            <div style="flex:1" class="mono">当前令牌：{{leaseToken||'（无）'}}</div>
+            <button class="ghost" @click="releaseLease">释放</button>
+          </div>
+        </div>
+
+        <div class="box" v-show="leftTab===2">
+          <h2>Cutover Entry <small>先租后写</small></h2>
+          <label>目标版本（须为候选）</label>
+          <input v-model="cutoverVersion"/>
+          <div class="hint">未持 version:{{cutoverVersion}} 的 cutover 租约 → 整笔拒绝，生效窗与正式区零改动。</div>
+          <div class="row">
+            <button class="ghost" style="flex:1" @click="leaseKind='cutover';acquireLease()">① 取得切版租约</button>
+            <button class="primary" style="flex:1" @click="doCutover">② 提交切版</button>
+          </div>
+
+          <h2 style="margin-top:18px">Remap Gate <small>先租后写</small></h2>
           <label>old_key</label>
           <input v-model="oldKey"/>
-          <button class="primary" @click="doRemap">重映入正式区</button>
-          <div class="err">{{actionErr}}</div>
+          <div class="hint">未持生效版本 {{activeVersion||'（无）'}} 的 remap 租约 → 正式区零增，只留争用审计。</div>
+          <div class="row">
+            <button class="ghost" style="flex:1" @click="leaseKind='remap';acquireLease()">① 取得重映租约</button>
+            <button class="primary" style="flex:1" @click="doRemap">② 重映入正式区</button>
+          </div>
+
+          <div class="err" style="margin-top:10px">{{actionErr}}</div>
+          <div class="ok" style="font-size:12px">{{actionOk}}</div>
         </div>
       </div>
+
       <div class="bridge"></div>
+
       <div class="pane">
         <div class="tabs">
           <button :class="{on:rightTab===0}" @click="rightTab=0">正式区</button>
           <button :class="{on:rightTab===1}" @click="rightTab=1">冲突队列</button>
+          <button :class="{on:rightTab===2}" @click="rightTab=2">争用审计</button>
         </div>
         <div class="box" v-show="rightTab===0">
           <h2>Formal Zone</h2>
           <table><thead><tr><th>entity</th><th>from</th><th>ver</th><th>at</th></tr></thead>
-          <tbody><tr v-for="f in formal" :key="f.id"><td class="ok">{{f.entity_key}}</td><td>{{f.mapped_from}}</td><td>{{f.version}}</td><td>{{f.created_at}}</td></tr></tbody></table>
+          <tbody><tr v-for="f in formal" :key="f.id"><td class="ok">{{f.entity_key}}</td><td>{{f.mapped_from}}</td><td>{{f.version}}</td><td class="mono">{{f.created_at}}</td></tr></tbody></table>
         </div>
         <div class="box" v-show="rightTab===1">
           <h2>Conflicts</h2>
           <table><thead><tr><th>old</th><th>reason</th><th>status</th></tr></thead>
           <tbody><tr v-for="c in conflicts" :key="c.id"><td class="bad">{{c.old_key}}</td><td>{{c.reason}}</td><td>{{c.status}}</td></tr></tbody></table>
+        </div>
+        <div class="box" v-show="rightTab===2">
+          <h2>Contention Audit <small>只读</small></h2>
+          <div class="hint">无租约请求、租约争用、库级守卫拒绝均在此留痕；正式区零增量。</div>
+          <table><thead><tr><th>at</th><th>path</th><th>scope</th><th>reason</th></tr></thead>
+          <tbody><tr v-for="c in contentions" :key="c.id">
+            <td class="mono">{{c.at}}</td><td :class="c.path==='lease'?'warn':'bad'">{{c.path}}</td>
+            <td class="mono">{{c.scope_key}}</td><td style="font-size:11px">{{c.reason}}</td>
+          </tr></tbody></table>
+          <div v-if="!contentions.length" class="muted" style="font-size:12px;margin-top:8px">暂无争用</div>
         </div>
       </div>
     </div>
